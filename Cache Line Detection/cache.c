@@ -2,9 +2,17 @@
 #include "fast_math.h"
 
 #include <stddef.h>
-#include <time.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <stdio.h>
+
+#ifdef PLATFORM_MACOS
+#include <mach/mach_time.h>
+typedef double timing_t;
+#else
+#include <time.h>
+typedef clock_t timing_t;
+#endif
 
 /*
 	This function is basically manually code generated.
@@ -34,7 +42,29 @@ static void iterate_through_data(char* data, unsigned int dataSize)
 		++data[(i * 64) & lengthMod];
 }
 
-static clock_t timed_iteration(char* data, unsigned int dataSize)
+/* Cross-platform timing abstraction */
+#ifdef PLATFORM_MACOS
+static double get_time_diff_nanos(void)
+{
+    mach_timebase_info_data_t timebase;
+    mach_timebase_info(&timebase);
+    return (double)timebase.numer / (double)timebase.denom;
+}
+
+static timing_t timed_iteration(char* data, unsigned int dataSize)
+{
+    uint64_t begin, end;
+    double time_diff;
+    
+    begin = mach_absolute_time();
+    iterate_through_data(data, dataSize);
+    end = mach_absolute_time();
+    
+    time_diff = (double)(end - begin) * get_time_diff_nanos();
+    return time_diff;
+}
+#else
+static timing_t timed_iteration(char* data, unsigned int dataSize)
 {
 	clock_t begin, end;
 
@@ -44,9 +74,10 @@ static clock_t timed_iteration(char* data, unsigned int dataSize)
 
 	return end - begin;
 }
+#endif
 
 static void fill_timing_data(
-		clock_t* timingData,
+		timing_t* timingData,
 		unsigned int timingDataLength,
 		unsigned int maxAlignment
 	)
@@ -84,14 +115,14 @@ static unsigned int determine_size_of_timing_data_required(unsigned int maxAlign
 	A decent heuristic - it worked on my machine!
 */
 static unsigned int get_cache_line_size_from_timing_data(
-		clock_t* timingData,
+		timing_t* timingData,
 		unsigned int numberOfDataPoints
 	)
 {
 	unsigned int i;
-	clock_t delta;
+	timing_t delta;
 
-	clock_t biggestJumpAmount = -9001;	/* It's under(?) 9000! */
+	timing_t biggestJumpAmount = -9001;	/* It's under(?) 9000! */
 
 	unsigned int locationOfBiggestJumpAmount = 0;
 
@@ -116,10 +147,8 @@ static unsigned int get_cache_line_size_from_timing_data(
 
 unsigned int get_cache_line(unsigned int max)
 {
-	unsigned int startAlignment = 1;
-
 	unsigned int timingDataLength = determine_size_of_timing_data_required(max);
-	clock_t* timingData = malloc(timingDataLength * sizeof(clock_t));
+	timing_t* timingData = malloc(timingDataLength * sizeof(timing_t));
 
 	unsigned int result;
 
@@ -138,3 +167,4 @@ unsigned int get_cache_line(unsigned int max)
 
 	return result;
 }
+
