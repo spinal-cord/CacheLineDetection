@@ -18,9 +18,12 @@ add_executable(cacheline_detect ${SOURCES})
 # Platform-specific settings
 if(APPLE)
     target_compile_definitions(cacheline_detect PRIVATE PLATFORM_MACOS=1)
-endif()
-
-if(WIN32)
+    message(STATUS "Building for macOS")
+elseif(UNIX AND NOT APPLE)
+    target_compile_definitions(cacheline_detect PRIVATE PLATFORM_LINUX=1)
+    message(STATUS "Building for Linux")
+elseif(WIN32)
     target_compile_definitions(cacheline_detect PRIVATE PLATFORM_WINDOWS=1)
+    message(STATUS "Building for Windows")
 endif()
 

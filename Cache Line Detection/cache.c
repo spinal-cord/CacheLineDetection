@@ -1,17 +1,76 @@
 #include "cache.h"
 #include "fast_math.h"
+#include "platform.h"
 
 #include <stddef.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <stdio.h>
 
-#ifdef PLATFORM_MACOS
-#include <mach/mach_time.h>
-typedef double timing_t;
-#else
-#include <time.h>
-typedef clock_t timing_t;
+/* Linux-specific cache detection using sysfs */
+#if PLATFORM_LINUX
+static unsigned int get_cache_line_linux_sysfs(void)
+{
+    FILE *fp;
+    char line[256];
+    unsigned int cache_line = 0;
+    
+    /* Try to read cache line size from sysfs */
+    fp = fopen("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r");
+    if (fp) {
+        if (fgets(line, sizeof(line), fp)) {
+            cache_line = (unsigned int)atoi(line);
+        }
+        fclose(fp);
+    }
+    
+    return cache_line;
+}
+
+static unsigned int get_cache_size_linux_sysfs(int level, int type)
+{
+    FILE *fp;
+    char path[256];
+    char line[256];
+    unsigned int cache_size = 0;
+    
+    /* Build path for specific cache level and type */
+    /* type: 0 = unified, 1 = instruction, 2 = data */
+    const char* type_str[] = {"", "index1", "index2"};
+    snprintf(path, sizeof(path), 
+             "/sys/devices/system/cpu/cpu0/cache/%s/size", type_str[type]);
+    
+    fp = fopen(path, "r");
+    if (fp) {
+        if (fgets(line, sizeof(line), fp)) {
+            /* Size is usually in KB, may have K suffix */
+            char* end;
+            cache_size = (unsigned int)strtoul(line, &end, 10);
+            if (*end == 'K' || *end == 'k') {
+                cache_size *= 1024;
+            }
+        }
+        fclose(fp);
+    }
+    
+    return cache_size;
+}
+
+static void get_l1_cache_linux(unsigned int* l1i, unsigned int* l1d)
+{
+    *l1i = get_cache_size_linux_sysfs(1, 1);  /* index1 is usually instruction */
+    *l1d = get_cache_size_linux_sysfs(1, 2);  /* index2 is usually data */
+}
+
+static unsigned int get_l2_cache_linux(void)
+{
+    return get_cache_size_linux_sysfs(2, 0);  /* index2 is unified L2 */
+}
+
+static unsigned int get_l3_cache_linux(void)
+{
+    return get_cache_size_linux_sysfs(3, 0);  /* index3 is L3 (if exists) */
+}
 #endif
 
 /*
@@ -43,7 +102,7 @@ static void iterate_through_data(char* data, unsigned int dataSize, unsigned int
 }
 
 /* Cross-platform timing abstraction */
-#ifdef PLATFORM_MACOS
+#if PLATFORM_MACOS
 static double get_time_diff_nanos(void)
 {
     mach_timebase_info_data_t timebase;
@@ -63,6 +122,17 @@ static timing_t timed_iteration(char* data, unsigned int dataSize, unsigned int 
     time_diff = (double)(end - begin) * get_time_diff_nanos();
     return time_diff;
 }
+#elif PLATFORM_LINUX
+static timing_t timed_iteration(char* data, unsigned int dataSize, unsigned int stride)
+{
+    double begin, end;
+    
+    begin = get_time_seconds();
+    iterate_through_data(data, dataSize, stride);
+    end = get_time_seconds();
+    
+    return (timing_t){.seconds = end - begin};
+}
 #else
 static timing_t timed_iteration(char* data, unsigned int dataSize, unsigned int stride)
 {
@@ -75,6 +145,68 @@ static timing_t timed_iteration(char* data, unsigned int dataSize, unsigned int 
 	return end - begin;
 }
 #endif
+
+/* Cross-platform timing comparison helpers */
+static timing_t timing_diff(timing_t a, timing_t b)
+{
+    timing_t result;
+#if PLATFORM_MACOS
+    result = a - b;
+#elif PLATFORM_LINUX
+    result.seconds = a.seconds - b.seconds;
+#else
+    result = a - b;
+#endif
+    return result;
+}
+
+static int timing_greater(timing_t a, timing_t b)
+{
+#if PLATFORM_MACOS
+    return a > b;
+#elif PLATFORM_LINUX
+    return a.seconds > b.seconds;
+#else
+    return a > b;
+#endif
+}
+
+static timing_t timing_multiply(timing_t t, double factor)
+{
+    timing_t result;
+#if PLATFORM_MACOS
+    result = t * factor;
+#elif PLATFORM_LINUX
+    result.seconds = t.seconds * factor;
+#else
+    result = t * factor;
+#endif
+    return result;
+}
+
+static timing_t timing_divide(timing_t t, double divisor)
+{
+    timing_t result;
+#if PLATFORM_MACOS
+    result = t / divisor;
+#elif PLATFORM_LINUX
+    result.seconds = t.seconds / divisor;
+#else
+    result = t / divisor;
+#endif
+    return result;
+}
+
+static double timing_to_double(timing_t t)
+{
+#if PLATFORM_MACOS
+    return (double)t;
+#elif PLATFORM_LINUX
+    return t.seconds;
+#else
+    return (double)t;
+#endif
+}
 
 static void fill_timing_data(
 		timing_t* timingData,
@@ -123,16 +255,22 @@ static unsigned int get_cache_line_size_from_timing_data(
 	unsigned int i;
 	timing_t delta;
 
+#if PLATFORM_MACOS
 	timing_t biggestJumpAmount = -9001;	/* It's under(?) 9000! */
+#elif PLATFORM_LINUX
+	timing_t biggestJumpAmount = (timing_t){.seconds = -9001};
+#else
+	timing_t biggestJumpAmount = -9001;
+#endif
 
 	unsigned int locationOfBiggestJumpAmount = 0;
 
 	/* We ignore the first point. You can't get a delta from just one point! */
 	for(i = 1; i < numberOfDataPoints; ++i)
 	{
-		delta = timingData[i] - timingData[i - 1];
+		delta = timing_diff(timingData[i], timingData[i - 1]);
 
-		if(delta > biggestJumpAmount)
+		if(timing_greater(delta, biggestJumpAmount))
 		{
 			biggestJumpAmount = delta;
 			locationOfBiggestJumpAmount = i;
@@ -223,30 +361,42 @@ static unsigned int detect_cache_line_size(unsigned int maxSize)
     */
     
     /* Find the stride transition with biggest relative time increase */
+#if PLATFORM_MACOS
     timing_t biggestJump = 0;
+#elif PLATFORM_LINUX
+    timing_t biggestJump = {0};
+#else
+    timing_t biggestJump = 0;
+#endif
     unsigned int cacheLineSize = 64; /* Default */
     
     for (i = 1; i < numCandidates; i++) {
-        timing_t timeAtSmallerStride = timings[i-1];
-        timing_t timeAtLargerStride = timings[i];
+        double timeAtSmallerStride = timing_to_double(timings[i-1]);
+        double timeAtLargerStride = timing_to_double(timings[i]);
         unsigned int smallerStride = candidateStrides[i-1];
         unsigned int largerStride = candidateStrides[i];
         
         if (timeAtSmallerStride > 0) {
             /* Relative time increase when doubling stride */
-            timing_t relativeJump = (timeAtLargerStride - timeAtSmallerStride) / timeAtSmallerStride;
+            double relativeJump = (timeAtLargerStride - timeAtSmallerStride) / timeAtSmallerStride;
             
             /* Time should roughly double when stride doubles (more cache line loads)
                But if stride is still within cache line, time increase is smaller */
             
             /* Find the stride where this ratio is closest to 1.0 (linear scaling)
                This indicates we've crossed the cache line boundary */
-            timing_t ratioToLinear = (relativeJump > 1.0) ? 
+            double ratioToLinear = (relativeJump > 1.0) ? 
                 (relativeJump - 1.0) : (1.0 - relativeJump);
             
             /* When stride doubles and time roughly doubles, we've crossed cache line */
-            if (ratioToLinear < biggestJump || biggestJump == 0) {
+            if (ratioToLinear < timing_to_double(biggestJump) || timing_to_double(biggestJump) == 0) {
+#if PLATFORM_MACOS
                 biggestJump = ratioToLinear;
+#elif PLATFORM_LINUX
+                biggestJump = (timing_t){.seconds = ratioToLinear};
+#else
+                biggestJump = ratioToLinear;
+#endif
                 /* The smaller stride is likely the cache line size */
                 cacheLineSize = smallerStride;
             }
@@ -258,19 +408,25 @@ static unsigned int detect_cache_line_size(unsigned int maxSize)
        When stride < cache line: time increases slowly (same cache line accesses)
        When stride crosses cache line: time jumps (new cache line per access)
     */
+#if PLATFORM_MACOS
     timing_t maxAbsJump = 0;
+#elif PLATFORM_LINUX
+    timing_t maxAbsJump = {0};
+#else
+    timing_t maxAbsJump = 0;
+#endif
     unsigned int jumpStride = 64;
     
     for (i = 1; i < numCandidates; i++) {
-        timing_t absJump = timings[i] - timings[i-1];
-        if (absJump > maxAbsJump) {
+        timing_t absJump = timing_diff(timings[i], timings[i-1]);
+        if (timing_greater(absJump, maxAbsJump)) {
             maxAbsJump = absJump;
             jumpStride = candidateStrides[i-1];
         }
     }
     
     /* The stride at the jump boundary is the cache line size */
-    if (maxAbsJump > 0) {
+    if (timing_to_double(maxAbsJump) > 0) {
         cacheLineSize = jumpStride;
     }
     
@@ -330,12 +486,18 @@ static unsigned int detect_cache_level(unsigned int minSize, unsigned int maxSiz
 	}
 	
 	/* Find the biggest jump in timing (cache boundary) */
+#if PLATFORM_MACOS
 	timing_t biggestJump = 0;
+#elif PLATFORM_LINUX
+	timing_t biggestJump = {0};
+#else
+	timing_t biggestJump = 0;
+#endif
 	unsigned int jumpLocation = 0;
 	
 	for (i = 1; i < numTests; i++) {
-		timing_t delta = timingData[i] - timingData[i - 1];
-		if (delta > biggestJump) {
+		timing_t delta = timing_diff(timingData[i], timingData[i - 1]);
+		if (timing_greater(delta, biggestJump)) {
 			biggestJump = delta;
 			jumpLocation = i;
 		}
@@ -356,9 +518,9 @@ static unsigned int detect_cache_level(unsigned int minSize, unsigned int maxSiz
 	
 	/* If no significant jump found, estimate based on timing pattern
 	   Look for the first size where timing exceeds baseline by > 50% */
-	if (numTests >= 2 && timingData[0] > 0) {
+	if (numTests >= 2 && timing_to_double(timingData[0]) > 0) {
 		for (i = 1; i < numTests; i++) {
-			if (timingData[i] > timingData[0] * 1.5) {
+			if (timing_to_double(timingData[i]) > timing_to_double(timingData[0]) * 1.5) {
 				unsigned int size = minSize;
 				unsigned int j;
 				for (j = 1; j < i; j++) {
@@ -410,17 +572,42 @@ unsigned int get_l3_cache(void)
 	return detect_cache_level(4 * 1024 * 1024, 64 * 1024 * 1024, cacheLine);
 }
 
+/* Get cache line size using native Linux sysfs */
+#if PLATFORM_LINUX
+static unsigned int get_cache_line_linux(void)
+{
+    FILE *fp;
+    char line[256];
+    unsigned int cache_line = 0;
+    
+    /* Try to read cache line size from sysfs */
+    fp = fopen("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r");
+    if (fp) {
+        if (fgets(line, sizeof(line), fp)) {
+            cache_line = (unsigned int)atoi(line);
+        }
+        fclose(fp);
+    }
+    
+    return cache_line;
+}
+#endif
+
 /*
 	Get all cache sizes in one call.
 */
 void get_all_cache_sizes(unsigned int results[4])
 {
 	/* First detect cache line size to use as stride for other detections */
-	unsigned int cacheLine = detect_cache_line_size(1 * 1024 * 1024);
-	
+	#if PLATFORM_LINUX
+		unsigned int cacheLine = get_cache_line_linux();
+	#else
+		unsigned int cacheLine = detect_cache_line_size(1 * 1024 * 1024);
+	#endif
 	results[0] = detect_cache_level(16 * 1024, 512 * 1024, cacheLine);  /* L1 */
 	results[1] = detect_cache_level(256 * 1024, 16 * 1024 * 1024, cacheLine);  /* L2 */
 	results[2] = detect_cache_level(4 * 1024 * 1024, 64 * 1024 * 1024, cacheLine);  /* L3/SLC */
 	results[3] = cacheLine;  /* Cache line */
 }
+
 

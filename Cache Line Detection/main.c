@@ -2,17 +2,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef PLATFORM_MACOS
-#include <sys/types.h>
-#include <sys/sysctl.h>
-#include <mach/mach.h>
-#endif
-
+#include "platform.h"
 #include "cache.h"
 #include "format.h"
 
 /* Get cache line size using native macOS sysctl (M1 compatible) */
-#ifdef PLATFORM_MACOS
+#if PLATFORM_MACOS
 static unsigned int get_cache_line_macOS(void)
 {
     int mib[2];
@@ -87,6 +82,71 @@ static unsigned int get_l3_cache_macOS(void)
     
     return l3Size;
 }
+
+/* Get cache line size using native Linux sysfs */
+#elif PLATFORM_LINUX
+static unsigned int get_cache_line_linux(void)
+{
+    FILE *fp;
+    char line[256];
+    unsigned int cache_line = 0;
+    
+    /* Try to read cache line size from sysfs */
+    fp = fopen("/sys/devices/system/cpu/cpu0/cache/index0/coherency_line_size", "r");
+    if (fp) {
+        if (fgets(line, sizeof(line), fp)) {
+            cache_line = (unsigned int)atoi(line);
+        }
+        fclose(fp);
+    }
+    
+    return cache_line;
+}
+
+static unsigned int get_cache_size_linux_sysfs(int level, int type)
+{
+    FILE *fp;
+    char path[256];
+    char line[256];
+    unsigned int cache_size = 0;
+    
+    /* Build path for specific cache level and type */
+    /* type: 0 = unified, 1 = instruction, 2 = data */
+    const char* type_str[] = {"", "index1", "index2"};
+    snprintf(path, sizeof(path), 
+             "/sys/devices/system/cpu/cpu0/cache/%s/size", type_str[type]);
+    
+    fp = fopen(path, "r");
+    if (fp) {
+        if (fgets(line, sizeof(line), fp)) {
+            /* Size is usually in KB, may have K suffix */
+            char* end;
+            cache_size = (unsigned int)strtoul(line, &end, 10);
+            if (*end == 'K' || *end == 'k') {
+                cache_size *= 1024;
+            }
+        }
+        fclose(fp);
+    }
+    
+    return cache_size;
+}
+
+static void get_l1_cache_linux(unsigned int* l1i, unsigned int* l1d)
+{
+    *l1i = get_cache_size_linux_sysfs(1, 1);  /* index1 is usually instruction */
+    *l1d = get_cache_size_linux_sysfs(1, 2);  /* index2 is usually data */
+}
+
+static unsigned int get_l2_cache_linux(void)
+{
+    return get_cache_size_linux_sysfs(2, 0);  /* index2 is unified L2 */
+}
+
+static unsigned int get_l3_cache_linux(void)
+{
+    return get_cache_size_linux_sysfs(3, 0);  /* index3 is L3 (if exists) */
+}
 #endif
 
 /* Print cache information with native and timing-based results */
@@ -96,7 +156,7 @@ static void print_cache_info(void)
     
     printf("=== Cache Detection Results ===\n\n");
     
-#ifdef PLATFORM_MACOS
+#if PLATFORM_MACOS
     /* Try native macOS methods first */
     unsigned int nativeL1i = 0, nativeL1d = 0;
     unsigned int nativeL2 = 0, nativeL3 = 0;
@@ -150,6 +210,61 @@ static void print_cache_info(void)
     }
     
     printf("\n-----------------------------------\n\n");
+    
+#elif PLATFORM_LINUX
+    /* Try native Linux methods using sysfs */
+    unsigned int nativeL1i = 0, nativeL1d = 0;
+    unsigned int nativeL2 = 0, nativeL3 = 0;
+    unsigned int nativeLine = 0;
+    
+    get_l1_cache_linux(&nativeL1i, &nativeL1d);
+    nativeL2 = get_l2_cache_linux();
+    nativeL3 = get_l3_cache_linux();
+    nativeLine = get_cache_line_linux();
+    
+    /* L1 Cache (Native) */
+    printf("L1 Cache (Native Linux):\n");
+    if (nativeL1i > 0 || nativeL1d > 0) {
+        if (nativeL1i > 0) {
+            struct size_of_data formattedL1i = unitfy_data_size(nativeL1i);
+            printf("  - Instruction: %u%s\n", formattedL1i.quantity, formattedL1i.unit);
+        }
+        if (nativeL1d > 0) {
+            struct size_of_data formattedL1d = unitfy_data_size(nativeL1d);
+            printf("  - Data: %u%s\n", formattedL1d.quantity, formattedL1d.unit);
+        }
+    } else {
+        printf("  Not available via sysfs\n");
+    }
+    
+    /* L2 Cache (Native) */
+    printf("\nL2 Cache (Native Linux):\n");
+    if (nativeL2 > 0) {
+        struct size_of_data formattedL2 = unitfy_data_size(nativeL2);
+        printf("  - Size: %u%s\n", formattedL2.quantity, formattedL2.unit);
+    } else {
+        printf("  Not available via sysfs\n");
+    }
+    
+    /* L3 Cache (Native) */
+    printf("\nL3 Cache (Native Linux):\n");
+    if (nativeL3 > 0) {
+        struct size_of_data formattedL3 = unitfy_data_size(nativeL3);
+        printf("  - Size: %u%s\n", formattedL3.quantity, formattedL3.unit);
+    } else {
+        printf("  Not available via sysfs (or no L3 cache)\n");
+    }
+    
+    /* Cache Line (Native) */
+    printf("\nCache Line (Native Linux):\n");
+    if (nativeLine > 0) {
+        struct size_of_data formattedLine = unitfy_data_size(nativeLine);
+        printf("  - Size: %u%s\n", formattedLine.quantity, formattedLine.unit);
+    } else {
+        printf("  Not available via sysfs\n");
+    }
+    
+    printf("\n-----------------------------------\n\n");
 #endif
     
     /* Timing-based detection results */
@@ -179,7 +294,7 @@ static void print_cache_info(void)
 /* Print architecture-specific info for M1 */
 static void print_m1_info(void)
 {
-#ifdef PLATFORM_MACOS
+#if PLATFORM_MACOS
     /* Get CPU type */
     size_t size = sizeof(uint32_t);
     uint32_t cputype;
@@ -212,8 +327,8 @@ int main(int argc, char** argv)
     print_m1_info();
     
     if (quickMode) {
-        /* Quick mode: only show native sysctl values */
-#ifdef PLATFORM_MACOS
+        /* Quick mode: only show native values */
+#if PLATFORM_MACOS
         unsigned int l1i = 0, l1d = 0;
         unsigned int l2 = 0, l3 = 0;
         unsigned int line = 0;
@@ -240,8 +355,35 @@ int main(int argc, char** argv)
             struct size_of_data f = unitfy_data_size(line);
             printf("  Cache Line: %u%s\n", f.quantity, f.unit);
         }
+#elif PLATFORM_LINUX
+        unsigned int l1i = 0, l1d = 0;
+        unsigned int l2 = 0, l3 = 0;
+        unsigned int line = 0;
+        
+        get_l1_cache_linux(&l1i, &l1d);
+        l2 = get_l2_cache_linux();
+        l3 = get_l3_cache_linux();
+        line = get_cache_line_linux();
+        
+        printf("Native Cache Information:\n");
+        if (l1d > 0) {
+            struct size_of_data f = unitfy_data_size(l1d);
+            printf("  L1 Data: %u%s\n", f.quantity, f.unit);
+        }
+        if (l2 > 0) {
+            struct size_of_data f = unitfy_data_size(l2);
+            printf("  L2: %u%s\n", f.quantity, f.unit);
+        }
+        if (l3 > 0) {
+            struct size_of_data f = unitfy_data_size(l3);
+            printf("  L3: %u%s\n", f.quantity, f.unit);
+        }
+        if (line > 0) {
+            struct size_of_data f = unitfy_data_size(line);
+            printf("  Cache Line: %u%s\n", f.quantity, f.unit);
+        }
 #else
-        printf("Quick mode only available on macOS\n");
+        printf("Quick mode not supported on this platform\n");
 #endif
     } else {
         /* Full mode: show both native and timing-based results */
