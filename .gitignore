@@ -1,3 +1,4 @@
+# Extensions
 
 *.exe
 *.ilk
@@ -11,3 +12,61 @@
 *.dep
 *.idb
 *.pdb
+*.a
+*.bat
+*.bin
+*.d
+*.dll
+*.dot
+*.etag
+*.gcda
+*.gcno
+*.gcov
+*.lastModified
+*.log
+*.metallib
+*.o
+*.so
+*.swp
+*.tmp
+*.DS_Store
+
+# IDE / OS
+
+/.cache/
+/.ccls-cache/
+/.direnv/
+/.envrc
+/.idea/
+/.swiftpm
+/.vs/
+/.vscode/
+/nppBackup
+
+# CI
+
+!/.github/workflows/*.yml
+
+
+# Zig
+/zig-out/
+/zig-cache/
+
+# Python
+
+/.venv
+__pycache__/
+*/poetry.lock
+poetry.toml
+
+# Nix
+/result
+
+# IDE
+/*.code-workspace
+/.windsurf/
+# emscripten
+a.out.*
+
+# Executables
+cacheline_detect
